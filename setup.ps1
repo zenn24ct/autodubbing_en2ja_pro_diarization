@@ -1,4 +1,4 @@
-# 英語→日本語 自動吹き替えシステム Pro（話者識別対応版）— Windowsセットアップ
+﻿# 英語→日本語 自動吹き替えシステム Pro（話者識別対応版）— Windowsセットアップ
 # MSI Katana 15 B13VGK 等、NVIDIA GPU搭載機を想定（CUDA版PyTorchを導入）
 #
 # 実行方法: PowerShellを「管理者として実行」する必要はありません。

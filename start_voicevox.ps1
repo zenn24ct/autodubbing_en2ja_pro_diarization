@@ -1,4 +1,4 @@
-$InstallDir = "$env:USERPROFILE\voicevox_engine"
+﻿$InstallDir = "$env:USERPROFILE\voicevox_engine"
 $RunExe     = Join-Path $InstallDir "run.exe"
 
 if (-not (Test-Path $RunExe)) {

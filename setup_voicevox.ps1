@@ -1,4 +1,4 @@
-# VOICEVOX エンジン セットアップ（Windows版）
+﻿# VOICEVOX エンジン セットアップ（Windows版）
 #
 # MSI Katana 15 B13VGK は NVIDIA GPU 搭載のため、既定では nvidia版アセットを探す。
 # 見つからない/GPUを使わない場合は自動的に cpu版へフォールバックする。

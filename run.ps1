@@ -1,4 +1,4 @@
-# 英語→日本語 自動吹き替えシステム Pro（話者識別対応版）— Windows起動スクリプト
+﻿# 英語→日本語 自動吹き替えシステム Pro（話者識別対応版）— Windows起動スクリプト
 
 $ErrorActionPreference = "Stop"
 
