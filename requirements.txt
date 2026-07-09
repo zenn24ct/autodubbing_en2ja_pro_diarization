@@ -1,0 +1,16 @@
+fastapi==0.137.2
+uvicorn[standard]==0.49.0
+python-multipart==0.0.32
+edge-tts==7.2.8
+pydub==0.25.1
+deep-translator==1.11.4
+numpy==2.4.6
+anthropic==0.109.2
+yt-dlp==2026.6.9
+python-dotenv==1.2.2
+
+# ── 文字起こし + 話者識別 ────────────────────────────────────────────
+# openai-whisper は WhisperX に置き換え（転写+単語アライメント+話者分離を内包）
+# torch / torchaudio は Windows(NVIDIA GPU)では requirements.txt より先に
+# CUDA版を明示インストールすること（setup.ps1 / setup.sh 参照）
+whisperx==3.3.1
