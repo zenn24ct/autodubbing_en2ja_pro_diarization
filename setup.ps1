@@ -32,7 +32,18 @@ if (-not (Test-Path ".venv")) {
 }
 . .\.venv\Scripts\Activate.ps1
 
+# pipのような外部exeはエラーで止まっても$ErrorActionPreference="Stop"の対象外
+# （非終了エラー扱いのため）なので、明示的に終了コードを確認して止める。
+function Invoke-CheckedCommand {
+    param([string]$Description)
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "❌ $Description に失敗しました（終了コード: $LASTEXITCODE）。上のエラー内容を確認してください。" -ForegroundColor Red
+        exit 1
+    }
+}
+
 python -m pip install --upgrade pip -q
+Invoke-CheckedCommand "pipのアップグレード"
 
 # ── PyTorch（CUDA版）───────────────────────────────────────────────────
 # MSI Katana 15 B13VGK は NVIDIA GPU 搭載のため、CUDA版PyTorchを明示的に先へ入れる。
@@ -40,8 +51,10 @@ python -m pip install --upgrade pip -q
 # GPUを使わない/CPUのみで動かす場合は下の1行を削除して構わない。
 Write-Host "PyTorch (CUDA 12.1版) をインストール中..." -ForegroundColor Cyan
 pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+Invoke-CheckedCommand "PyTorch(CUDA版)のインストール"
 
 pip install -r requirements.txt
+Invoke-CheckedCommand "requirements.txtのインストール"
 
 # ── .env ──────────────────────────────────────────────────────────────
 if (-not (Test-Path ".env")) {
