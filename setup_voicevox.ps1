@@ -9,6 +9,8 @@
 #       万一自動検出に失敗した場合は、手動ダウンロード手順を表示する。
 
 $ErrorActionPreference = "Stop"
+# 既定の進捗バー描画はInvoke-WebRequestを極端に遅くする（数GBのDLが「固まった」ように見える主因）
+$ProgressPreference = "SilentlyContinue"
 
 $InstallDir = "$env:USERPROFILE\voicevox_engine"
 $RunExe     = Join-Path $InstallDir "run.exe"
@@ -23,7 +25,10 @@ Write-Host "=== VOICEVOX エンジン セットアップ (Windows) ===" -Foregro
 $ReleasesUrl = "https://api.github.com/repos/VOICEVOX/voicevox_engine/releases/latest"
 
 try {
-    $release = Invoke-RestMethod -Uri $ReleasesUrl -Headers @{ "User-Agent" = "autodubbing-setup" }
+    # -UseBasicParsing: Windows PowerShell 5.1はIEエンジンでHTML解析しようとして
+    # 初回起動時のIE設定が絡み固まることがあるため、単純なテキスト/JSON解析に留める
+    $release = Invoke-RestMethod -Uri $ReleasesUrl -Headers @{ "User-Agent" = "autodubbing-setup" } `
+        -UseBasicParsing -TimeoutSec 30
 } catch {
     Write-Host "❌ GitHub Releases情報の取得に失敗しました: $_" -ForegroundColor Red
     Write-Host "手動で https://github.com/VOICEVOX/voicevox_engine/releases から"
@@ -57,8 +62,14 @@ if ($usedVariant -eq "cpu") {
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 $downloadPath = Join-Path $env:TEMP $asset.name
 
-Write-Host "ダウンロード中...（$([math]::Round($asset.size / 1MB, 1)) MB）"
-Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $downloadPath
+Write-Host "ダウンロード中...（$([math]::Round($asset.size / 1MB, 1)) MB、回線次第で数分〜数十分かかります）"
+Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $downloadPath -UseBasicParsing
+
+if (-not (Test-Path $downloadPath) -or (Get-Item $downloadPath).Length -eq 0) {
+    Write-Host "❌ ダウンロードに失敗しました（ファイルが作成されていません）" -ForegroundColor Red
+    exit 1
+}
+Write-Host "ダウンロード完了（$([math]::Round((Get-Item $downloadPath).Length / 1MB, 1)) MB）"
 
 Write-Host "展開中..."
 if ($asset.name -like "*.zip") {
