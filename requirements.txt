@@ -3,6 +3,9 @@ uvicorn[standard]==0.49.0
 python-multipart==0.0.32
 edge-tts==7.2.8
 pydub==0.25.1
+# Python 3.13で標準ライブラリのaudioopが削除されたため、pydubが依存する
+# audioopをバックポートで補う（3.13未満では不要なので環境マーカーで条件付け）
+audioop-lts==0.2.2; python_version >= "3.13"
 deep-translator==1.11.4
 numpy==2.4.6
 anthropic==0.109.2
