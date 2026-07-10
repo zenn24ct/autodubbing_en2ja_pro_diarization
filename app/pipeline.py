@@ -518,21 +518,35 @@ def tts_edge(text: str, output_path: str, edge_voice: str) -> None:
 
 
 def tts_segment(text: str, output_path: str, voice_key: str, target_lang: str = "ja") -> None:
-    """target_langに応じてTTSバックエンドを切り替える。
-    - ja: VOICEVOXを試み、失敗したらedge-tts(日本語ボイス)にフォールバック
-    - それ以外(en等): VOICEVOXは日本語専用のため使えない。edge-ttsの該当言語ボイスを直接使う
+    """target_langとエンジン指定に応じてTTSバックエンドを切り替える。
+
+    voice_keyは "engine:key" 形式でエンジンを明示できる（例: "edge:female",
+    "voicevox:female"）。プレフィックスが無い素の "female" 等は後方互換のため
+    従来動作（ja=VOICEVOX優先）とする。
+    - ja + edge指定     : edge-tts(日本語ボイス)を直接使う（VOICEVOXは使わない）
+    - ja + voicevox/無指定: VOICEVOXを試み、失敗したらedge-tts(日本語)にフォールバック
+    - それ以外(en等)     : VOICEVOXは日本語専用のため使えない。edge-tts該当言語ボイスを直接使う
     """
+    engine, sep, key = voice_key.partition(":")
+    if not sep:            # プレフィックス無し → engineは空、keyに全体を入れる
+        key, engine = engine, ""
+
     if target_lang == "ja":
-        speaker_id = VOICEVOX_SPEAKERS.get(voice_key, VOICEVOX_SPEAKERS["female"])
+        if engine == "edge":
+            edge_voice = EDGE_VOICES_JA.get(key, EDGE_VOICES_JA["female"])
+            tts_edge(text, output_path, edge_voice)
+            return
+        # voicevox指定 or 無指定 → VOICEVOX優先、失敗時のみedgeへフォールバック
+        speaker_id = VOICEVOX_SPEAKERS.get(key, VOICEVOX_SPEAKERS["female"])
         try:
             tts_voicevox(text, output_path, speaker_id)
             return
         except Exception as e:
             print(f"[VOICEVOX失敗 → edge-ttsにフォールバック] {e}")
-            edge_voice = EDGE_VOICES_JA.get(voice_key, EDGE_VOICES_JA["female"])
+            edge_voice = EDGE_VOICES_JA.get(key, EDGE_VOICES_JA["female"])
             tts_edge(text, output_path, edge_voice)
     else:
-        edge_voice = EDGE_VOICES_EN.get(voice_key, EDGE_VOICES_EN["female"])
+        edge_voice = EDGE_VOICES_EN.get(key, EDGE_VOICES_EN["female"])
         tts_edge(text, output_path, edge_voice)
 
 

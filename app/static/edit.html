@@ -101,25 +101,27 @@
   const jobId   = params.get('job');
   let segments  = [];
   let sourceSegments = {};
-  let speakerVoiceMap = {}; // { "SPEAKER_00": "female", "SPEAKER_01": "male", ... }
+  let speakerVoiceMap = {}; // { "SPEAKER_00": "voicevox:female", ... }
   let targetLang = 'ja';
 
-  // 未割り当ての話者に順番に割り当てるデフォルト音声（バックエンドと同じ並び）
-  const VOICE_ROTATION = ['female', 'male', 'female2', 'male2'];
-  const VOICE_LABELS = {
-    ja: {
-      female:  'ずんだもん（VOICEVOX） / Nanami（edge-tts）',
-      male:    '玄野武宏（VOICEVOX） / Keita（edge-tts）',
-      female2: '春日部つむぎ（VOICEVOX）',
-      male2:   '四国めたん（VOICEVOX）',
-    },
-    en: {
-      female:  'Aria (US, edge-tts)',
-      male:    'Guy (US, edge-tts)',
-      female2: 'Sonia (UK, edge-tts)',
-      male2:   'Ryan (UK, edge-tts)',
-    },
+  // 方向ごとの選択可能ボイス（value はエンジン込み。ja=VOICEVOX/edge, en=edgeのみ）
+  const VOICE_SETS = {
+    ja: [
+      { value: 'voicevox:female',  label: 'ずんだもん（VOICEVOX）' },
+      { value: 'voicevox:male',    label: '玄野武宏（VOICEVOX）' },
+      { value: 'voicevox:female2', label: '春日部つむぎ（VOICEVOX）' },
+      { value: 'voicevox:male2',   label: '四国めたん（VOICEVOX）' },
+      { value: 'edge:female',      label: '女性 Nanami（edge-tts）' },
+      { value: 'edge:male',        label: '男性 Keita（edge-tts）' },
+    ],
+    en: [
+      { value: 'female',  label: 'Aria (US, edge-tts)' },
+      { value: 'male',    label: 'Guy (US, edge-tts)' },
+      { value: 'female2', label: 'Sonia (UK, edge-tts)' },
+      { value: 'male2',   label: 'Ryan (UK, edge-tts)' },
+    ],
   };
+  function voiceSet() { return VOICE_SETS[targetLang] || VOICE_SETS.ja; }
 
   if (!jobId) {
     document.getElementById('segment-list').innerHTML = '<div class="loading">Job ID が指定されていません。</div>';
@@ -164,8 +166,9 @@
   function renderSpeakerVoiceCard(speakers) {
     if (!speakers.length) return;
 
+    const options = voiceSet();
     speakers.forEach((sp, i) => {
-      speakerVoiceMap[sp] = VOICE_ROTATION[i % VOICE_ROTATION.length];
+      speakerVoiceMap[sp] = options[i % options.length].value;
     });
 
     const card = document.getElementById('speaker-voice-card');
@@ -178,12 +181,11 @@
     }
 
     card.style.display = '';
-    const labels = VOICE_LABELS[targetLang] || VOICE_LABELS.ja;
     list.innerHTML = speakers.map(sp => `
       <div class="speaker-voice-row">
         <label>${escHtml(sp)}</label>
         <select data-speaker="${escHtml(sp)}" onchange="onSpeakerVoiceChange(this)">
-          ${VOICE_ROTATION.map(v => `<option value="${v}" ${v === speakerVoiceMap[sp] ? 'selected' : ''}>${labels[v]}</option>`).join('')}
+          ${options.map(o => `<option value="${o.value}" ${o.value === speakerVoiceMap[sp] ? 'selected' : ''}>${o.label}</option>`).join('')}
         </select>
       </div>
     `).join('');
@@ -255,7 +257,7 @@
   async function runPipeline() {
     await saveSegments();
     const speakers = Object.keys(speakerVoiceMap);
-    const fallbackVoice = speakers.length ? speakerVoiceMap[speakers[0]] : 'female';
+    const fallbackVoice = speakers.length ? speakerVoiceMap[speakers[0]] : voiceSet()[0].value;
 
     const fd = new FormData();
     fd.append('voice', fallbackVoice);
