@@ -56,12 +56,12 @@ Invoke-CheckedCommand "requirements.txtのインストール"
 #   CPU版torch(+cpu)が先に入れたCUDA版を上書きしてしまう（torch.cuda.is_available()=False）。
 #   最後にCUDA版を --force-reinstall で確定させることで確実にCUDA版を残す。
 #
-# cu124インデックスを使用: PyTorchは2.6以降でPython 3.13対応となり、その際
-# cu121ビルドが廃止されcu124へ移行した。Python 3.13環境ではcu121を指定すると
-# 「No matching distribution found for torch」になるためcu124を使う。
-# GPUを使わない/CPUのみで動かす場合は下の pip 行を削除して構わない。
-Write-Host "PyTorch (CUDA 12.4版) をインストール中..." -ForegroundColor Cyan
-pip install --force-reinstall torch torchaudio --index-url https://download.pytorch.org/whl/cu124
+# バージョンは torch 2.8.0 に固定する。whisperx 3.8.6 / pyannote-audio 4.0.7 が
+# torch~=2.8.0 を要求するため。torch 2.8.0 のCUDAビルドは cu126/cu128 で提供され
+# （cu124は2.6.0が最後）、MSI KatanaのドライバはCUDA 12.9対応なので cu128 を使う
+# （12.9 >= 12.8 で下位互換）。GPUを使わない場合は下の pip 行を削除して構わない。
+Write-Host "PyTorch 2.8.0 (CUDA 12.8版) をインストール中..." -ForegroundColor Cyan
+pip install --force-reinstall "torch==2.8.0" "torchaudio==2.8.0" --index-url https://download.pytorch.org/whl/cu128
 Invoke-CheckedCommand "PyTorch(CUDA版)のインストール"
 
 # CUDA が有効か検証（Falseならヒントを表示）
