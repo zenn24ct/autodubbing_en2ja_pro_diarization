@@ -7,7 +7,7 @@
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "=== 英語→日本語 自動吹き替えシステム Pro セットアップ (Windows) ===" -ForegroundColor Cyan
+Write-Host "=== 自動吹き替えシステム Pro（EN⇄JA） セットアップ (Windows) ===" -ForegroundColor Cyan
 
 # ── ffmpeg 確認 ──────────────────────────────────────────────────────
 if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
@@ -49,8 +49,12 @@ Invoke-CheckedCommand "pipのアップグレード"
 # MSI Katana 15 B13VGK は NVIDIA GPU 搭載のため、CUDA版PyTorchを明示的に先へ入れる。
 # 何もせず `pip install -r requirements.txt` だけだとCPU版が入りWhisperX/diarizationが遅くなる。
 # GPUを使わない/CPUのみで動かす場合は下の1行を削除して構わない。
-Write-Host "PyTorch (CUDA 12.1版) をインストール中..." -ForegroundColor Cyan
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+#
+# cu124インデックスを使用: PyTorchは2.6以降でPython 3.13対応となり、その際
+# cu121ビルドが廃止されcu124へ移行した。Python 3.13環境ではcu121を指定すると
+# 「No matching distribution found for torch」になるためcu124を使う。
+Write-Host "PyTorch (CUDA 12.4版) をインストール中..." -ForegroundColor Cyan
+pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
 Invoke-CheckedCommand "PyTorch(CUDA版)のインストール"
 
 pip install -r requirements.txt
