@@ -38,26 +38,33 @@ try {
 }
 
 # windows + (nvidia優先 → 無ければcpu) のアセット群を探す
-# VOICEVOXは .vvpp（単一ファイル）または .NNN.vvppp（分割ファイル、要結合）で配布される。
-# .vvpp/.vvppp の正体は拡張子を変えただけのZIPファイル。
-$candidates = $release.assets | Where-Object { $_.name -match "windows" }
-$variantAssets = @($candidates | Where-Object { $_.name -match "nvidia" })
+# 1リリースにvvpp/vvppp形式と7z形式の両方が同居しているため、
+# 「windows」「nvidia」に一致するだけでは.txt説明ファイルや別形式まで拾ってしまう。
+# 拡張子で厳密に絞り込み、1つの形式だけを選ぶ（優先順位: vvpp/vvppp → zip → 7z）。
+function Get-VoicevoxAssets($allAssets, $variantPattern) {
+    $matched = $allAssets | Where-Object { $_.name -match "windows" -and $_.name -match $variantPattern }
+    $vvpp = @($matched | Where-Object { $_.name -match "\.vvppp?$" } | Sort-Object name)
+    if ($vvpp.Count -gt 0) { return $vvpp }
+    $zip = @($matched | Where-Object { $_.name -match "\.zip$" } | Sort-Object name)
+    if ($zip.Count -gt 0) { return $zip }
+    $sevenZ = @($matched | Where-Object { $_.name -match "\.7z(\.\d+)?$" } | Sort-Object name)
+    return $sevenZ
+}
+
+$variantAssets = Get-VoicevoxAssets $release.assets "nvidia"
 $usedVariant = "nvidia"
-if (-not $variantAssets) {
-    $variantAssets = @($candidates | Where-Object { $_.name -match "cpu" })
+if ($variantAssets.Count -eq 0) {
+    $variantAssets = Get-VoicevoxAssets $release.assets "cpu"
     $usedVariant = "cpu"
 }
 
-if (-not $variantAssets) {
+if ($variantAssets.Count -eq 0) {
     Write-Host "❌ Windows向けアセットが見つかりませんでした。" -ForegroundColor Red
     Write-Host "手動で https://github.com/VOICEVOX/voicevox_engine/releases から"
     Write-Host "windows向けのアセットをダウンロードし、次のフォルダへ展開してください:"
     Write-Host "  $InstallDir"
     exit 1
 }
-
-# 分割ファイルはパート番号順に処理する必要があるため名前でソート
-$variantAssets = $variantAssets | Sort-Object name
 
 Write-Host "検出: $($variantAssets.Count)個のファイル（$usedVariant 版）"
 $variantAssets | ForEach-Object { Write-Host "  - $($_.name)" }
@@ -122,10 +129,30 @@ if ($firstName -match "\.vvppp?$" -or $firstName -like "*.zip") {
 
 Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
 
+# 展開したZIPの中身が1階層深いサブフォルダに入っている場合（よくあるパターン）は
+# run.exeが見つかった場所の中身を $InstallDir 直下へ移動してフラット化する
 if (-not (Test-Path $RunExe)) {
-    Write-Host "⚠️  展開後に run.exe が見つかりません。$InstallDir の中身を確認してください。" -ForegroundColor Yellow
-    Write-Host "   （展開後のフォルダ構成が1階層深い場合があります。$InstallDir の中を確認してください）"
+    $found = Get-ChildItem -Path $InstallDir -Recurse -Filter "run.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($found -and $found.DirectoryName -ne $InstallDir) {
+        Write-Host "run.exe がサブフォルダ '$($found.DirectoryName)' にあるため $InstallDir 直下へ移動します..."
+        Get-ChildItem -Path $found.DirectoryName -Force | Move-Item -Destination $InstallDir -Force
+        # 空になったサブフォルダを掃除
+        Get-ChildItem -Path $InstallDir -Directory -Force | ForEach-Object {
+            if ((Get-ChildItem $_.FullName -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object).Count -eq 0) {
+                Remove-Item $_.FullName -Force -Recurse -ErrorAction SilentlyContinue
+            }
+        }
+    }
 }
 
-Write-Host "✅ VOICEVOX セットアップ完了"
+if (-not (Test-Path $RunExe)) {
+    Write-Host "⚠️  展開後に run.exe が見つかりません。以下が $InstallDir の実際の中身です:" -ForegroundColor Yellow
+    Get-ChildItem -Path $InstallDir -Recurse -Force -ErrorAction SilentlyContinue |
+        Select-Object -First 40 |
+        ForEach-Object { Write-Host "   $($_.FullName)" }
+    Write-Host "上記に .exe ファイルがあれば、そのファイル名を教えてください（run.exeという名前でない可能性があります）"
+    exit 1
+}
+
+Write-Host "✅ VOICEVOX セットアップ完了: $RunExe"
 Write-Host "起動: .\start_voicevox.ps1"
