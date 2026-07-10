@@ -167,6 +167,34 @@ def merge_into_sentences(segments: list[dict]) -> list[dict]:
 
 
 # ── STEP 1: WhisperX 文字起こし + 話者識別 ────────────────────────────
+def _make_diarization_pipeline(hf_token: str, device: str):
+    """WhisperXの話者分離パイプラインを生成する。
+
+    whisperx/pyannote-audioのバージョンによって
+    ・クラスの場所（whisperx.diarize.DiarizationPipeline / whisperx.DiarizationPipeline）
+    ・認証トークンの引数名（use_auth_token / token）
+    が異なるため、利用可能な組み合わせを順に試す。
+    """
+    # クラスの場所を解決
+    pipeline_cls = None
+    diarize_mod = getattr(whisperx, "diarize", None)
+    if diarize_mod is not None and hasattr(diarize_mod, "DiarizationPipeline"):
+        pipeline_cls = diarize_mod.DiarizationPipeline
+    elif hasattr(whisperx, "DiarizationPipeline"):
+        pipeline_cls = whisperx.DiarizationPipeline
+    else:
+        raise RuntimeError("whisperxにDiarizationPipelineが見つかりません")
+
+    # 引数名の違いを吸収（新しい版は token、古い版は use_auth_token）
+    last_err = None
+    for kwargs in ({"token": hf_token}, {"use_auth_token": hf_token}):
+        try:
+            return pipeline_cls(device=device, **kwargs)
+        except TypeError as e:
+            last_err = e
+    raise last_err
+
+
 def _assign_segment_speakers(result: dict) -> list[dict]:
     """WhisperXのalign結果(単語ごとにspeakerが付く)から、セグメント単位の
     speakerを決定する。セグメント内で最頻出のspeakerを採用する。"""
@@ -249,9 +277,7 @@ def run_transcription(
                     if DIARIZATION_MAX_SPEAKERS:
                         diarize_kwargs["max_speakers"] = int(DIARIZATION_MAX_SPEAKERS)
 
-                    diarize_model = whisperx.diarize.DiarizationPipeline(
-                        use_auth_token=HF_TOKEN, device=WHISPERX_DEVICE,
-                    )
+                    diarize_model = _make_diarization_pipeline(HF_TOKEN, WHISPERX_DEVICE)
                     diarize_df = diarize_model(audio, **diarize_kwargs)
                     if aligned:
                         result = whisperx.assign_word_speakers(diarize_df, result)
@@ -426,6 +452,10 @@ def translate_and_refine(
 
     # STEP3: Claude口語化整形（APIキーがあれば）
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    # .env.exampleのプレースホルダ（sk-ant-xxxx...）のままなら未設定扱いにして
+    # 認証エラーの長いトレースバックを避ける
+    if api_key.startswith("sk-ant-xxx") or "xxxx" in api_key:
+        api_key = ""
     if api_key:
         update_status(job_id, "refining", 80,
                       "Claude API で口語化・整形中...（吹き替え用に自然な言い回しに変換）")
