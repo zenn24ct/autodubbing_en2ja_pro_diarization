@@ -45,20 +45,30 @@ function Invoke-CheckedCommand {
 python -m pip install --upgrade pip -q
 Invoke-CheckedCommand "pipのアップグレード"
 
+# ── 依存パッケージ ─────────────────────────────────────────────────────
+pip install -r requirements.txt
+Invoke-CheckedCommand "requirements.txtのインストール"
+
 # ── PyTorch（CUDA版）───────────────────────────────────────────────────
-# MSI Katana 15 B13VGK は NVIDIA GPU 搭載のため、CUDA版PyTorchを明示的に先へ入れる。
-# 何もせず `pip install -r requirements.txt` だけだとCPU版が入りWhisperX/diarizationが遅くなる。
-# GPUを使わない/CPUのみで動かす場合は下の1行を削除して構わない。
+# MSI Katana 15 B13VGK は NVIDIA GPU 搭載のため、CUDA版PyTorchを入れる。
+# ※必ず requirements.txt の「後」に入れること。
+#   whisperx等がtorchに依存しており、requirements.txtを後から入れるとPyPI既定の
+#   CPU版torch(+cpu)が先に入れたCUDA版を上書きしてしまう（torch.cuda.is_available()=False）。
+#   最後にCUDA版を --force-reinstall で確定させることで確実にCUDA版を残す。
 #
 # cu124インデックスを使用: PyTorchは2.6以降でPython 3.13対応となり、その際
 # cu121ビルドが廃止されcu124へ移行した。Python 3.13環境ではcu121を指定すると
 # 「No matching distribution found for torch」になるためcu124を使う。
+# GPUを使わない/CPUのみで動かす場合は下の pip 行を削除して構わない。
 Write-Host "PyTorch (CUDA 12.4版) をインストール中..." -ForegroundColor Cyan
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
+pip install --force-reinstall torch torchaudio --index-url https://download.pytorch.org/whl/cu124
 Invoke-CheckedCommand "PyTorch(CUDA版)のインストール"
 
-pip install -r requirements.txt
-Invoke-CheckedCommand "requirements.txtのインストール"
+# CUDA が有効か検証（Falseならヒントを表示）
+python -c "import torch; import sys; ok = torch.cuda.is_available(); print(f'torch {torch.__version__} / CUDA available: {ok}'); sys.exit(0 if ok else 3)"
+if ($LASTEXITCODE -eq 3) {
+    Write-Host "⚠️  PyTorchはCPU版として認識されています。GPUドライバ(nvidia-smi)を確認してください。" -ForegroundColor Yellow
+}
 
 # ── .env ──────────────────────────────────────────────────────────────
 if (-not (Test-Path ".env")) {
