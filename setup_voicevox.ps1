@@ -37,16 +37,18 @@ try {
     exit 1
 }
 
-# windows + (nvidia優先 → 無ければcpu) のアセットを探す
+# windows + (nvidia優先 → 無ければcpu) のアセット群を探す
+# VOICEVOXは .vvpp（単一ファイル）または .NNN.vvppp（分割ファイル、要結合）で配布される。
+# .vvpp/.vvppp の正体は拡張子を変えただけのZIPファイル。
 $candidates = $release.assets | Where-Object { $_.name -match "windows" }
-$asset = $candidates | Where-Object { $_.name -match "nvidia" } | Select-Object -First 1
+$variantAssets = @($candidates | Where-Object { $_.name -match "nvidia" })
 $usedVariant = "nvidia"
-if (-not $asset) {
-    $asset = $candidates | Where-Object { $_.name -match "cpu" } | Select-Object -First 1
+if (-not $variantAssets) {
+    $variantAssets = @($candidates | Where-Object { $_.name -match "cpu" })
     $usedVariant = "cpu"
 }
 
-if (-not $asset) {
+if (-not $variantAssets) {
     Write-Host "❌ Windows向けアセットが見つかりませんでした。" -ForegroundColor Red
     Write-Host "手動で https://github.com/VOICEVOX/voicevox_engine/releases から"
     Write-Host "windows向けのアセットをダウンロードし、次のフォルダへ展開してください:"
@@ -54,27 +56,55 @@ if (-not $asset) {
     exit 1
 }
 
-Write-Host "検出: $($asset.name)（$usedVariant 版）"
+# 分割ファイルはパート番号順に処理する必要があるため名前でソート
+$variantAssets = $variantAssets | Sort-Object name
+
+Write-Host "検出: $($variantAssets.Count)個のファイル（$usedVariant 版）"
+$variantAssets | ForEach-Object { Write-Host "  - $($_.name)" }
 if ($usedVariant -eq "cpu") {
     Write-Host "⚠️  NVIDIA版が見つからなかったためCPU版を使用します（音声合成が遅くなります）" -ForegroundColor Yellow
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-$downloadPath = Join-Path $env:TEMP $asset.name
+$tempDir = Join-Path $env:TEMP "voicevox_dl"
+New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
 
-Write-Host "ダウンロード中...（$([math]::Round($asset.size / 1MB, 1)) MB、回線次第で数分〜数十分かかります）"
-Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $downloadPath -UseBasicParsing
+$downloadedFiles = @()
+foreach ($a in $variantAssets) {
+    $dest = Join-Path $tempDir $a.name
+    Write-Host "ダウンロード中: $($a.name)（$([math]::Round($a.size / 1MB, 1)) MB、回線次第で数分〜数十分かかります）"
+    Invoke-WebRequest -Uri $a.browser_download_url -OutFile $dest -UseBasicParsing
 
-if (-not (Test-Path $downloadPath) -or (Get-Item $downloadPath).Length -eq 0) {
-    Write-Host "❌ ダウンロードに失敗しました（ファイルが作成されていません）" -ForegroundColor Red
-    exit 1
+    if (-not (Test-Path $dest) -or (Get-Item $dest).Length -eq 0) {
+        Write-Host "❌ ダウンロードに失敗しました: $($a.name)" -ForegroundColor Red
+        exit 1
+    }
+    $downloadedFiles += $dest
 }
-Write-Host "ダウンロード完了（$([math]::Round((Get-Item $downloadPath).Length / 1MB, 1)) MB）"
+Write-Host "ダウンロード完了（全 $($downloadedFiles.Count) ファイル）"
+
+# .vvpp/.vvppp は拡張子違いのZIPなので、必要なら結合してから .zip として展開する
+$combinedZip = Join-Path $tempDir "voicevox_engine_combined.zip"
+if ($downloadedFiles.Count -eq 1) {
+    Copy-Item $downloadedFiles[0] $combinedZip -Force
+} else {
+    Write-Host "分割ファイルを結合中..."
+    $outStream = [System.IO.File]::Create($combinedZip)
+    try {
+        foreach ($f in $downloadedFiles) {
+            $bytes = [System.IO.File]::ReadAllBytes($f)
+            $outStream.Write($bytes, 0, $bytes.Length)
+        }
+    } finally {
+        $outStream.Close()
+    }
+}
 
 Write-Host "展開中..."
-if ($asset.name -like "*.zip") {
-    Expand-Archive -Path $downloadPath -DestinationPath $InstallDir -Force
-} elseif ($asset.name -like "*.7z*") {
+$firstName = $variantAssets[0].name
+if ($firstName -match "\.vvppp?$" -or $firstName -like "*.zip") {
+    Expand-Archive -Path $combinedZip -DestinationPath $InstallDir -Force
+} elseif ($firstName -like "*.7z*") {
     $sevenZip = Get-Command 7z.exe -ErrorAction SilentlyContinue
     if (-not $sevenZip -and (Test-Path "C:\Program Files\7-Zip\7z.exe")) {
         $sevenZip = "C:\Program Files\7-Zip\7z.exe"
@@ -84,16 +114,17 @@ if ($asset.name -like "*.zip") {
         Write-Host "   winget install 7zip.7zip"
         exit 1
     }
-    & $sevenZip x $downloadPath -o"$InstallDir" -y
+    & $sevenZip x $combinedZip -o"$InstallDir" -y
 } else {
-    Write-Host "❌ 未対応の圧縮形式です: $($asset.name)" -ForegroundColor Red
+    Write-Host "❌ 未対応の圧縮形式です: $firstName" -ForegroundColor Red
     exit 1
 }
 
-Remove-Item $downloadPath -ErrorAction SilentlyContinue
+Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
 
 if (-not (Test-Path $RunExe)) {
     Write-Host "⚠️  展開後に run.exe が見つかりません。$InstallDir の中身を確認してください。" -ForegroundColor Yellow
+    Write-Host "   （展開後のフォルダ構成が1階層深い場合があります。$InstallDir の中を確認してください）"
 }
 
 Write-Host "✅ VOICEVOX セットアップ完了"
