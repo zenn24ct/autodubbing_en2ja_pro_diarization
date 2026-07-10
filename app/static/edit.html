@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>翻訳結果 編集 — 英語→日本語 自動吹き替え</title>
+<title>翻訳結果 編集 — 自動吹き替え（EN⇄JA）</title>
 <style>
   :root {
     --primary: #2563eb;
@@ -85,7 +85,7 @@
 
 <main>
   <div class="info-bar">
-    各行の <strong>日本語訳</strong> を自由に編集できます。保存後「吹き替え生成」を押すと、編集内容で音声合成されます。
+    各行の <strong>翻訳結果</strong> を自由に編集できます。保存後「吹き替え生成」を押すと、編集内容で音声合成されます。
   </div>
 
   <div id="speaker-voice-card">
@@ -100,16 +100,25 @@
   const params  = new URLSearchParams(location.search);
   const jobId   = params.get('job');
   let segments  = [];
-  let enSegments = {};
+  let sourceSegments = {};
   let speakerVoiceMap = {}; // { "SPEAKER_00": "female", "SPEAKER_01": "male", ... }
+  let targetLang = 'ja';
 
   // 未割り当ての話者に順番に割り当てるデフォルト音声（バックエンドと同じ並び）
   const VOICE_ROTATION = ['female', 'male', 'female2', 'male2'];
   const VOICE_LABELS = {
-    female:  'ずんだもん（VOICEVOX） / Nanami（edge-tts）',
-    male:    '玄野武宏（VOICEVOX） / Keita（edge-tts）',
-    female2: '春日部つむぎ（VOICEVOX）',
-    male2:   '四国めたん（VOICEVOX）',
+    ja: {
+      female:  'ずんだもん（VOICEVOX） / Nanami（edge-tts）',
+      male:    '玄野武宏（VOICEVOX） / Keita（edge-tts）',
+      female2: '春日部つむぎ（VOICEVOX）',
+      male2:   '四国めたん（VOICEVOX）',
+    },
+    en: {
+      female:  'Aria (US, edge-tts)',
+      male:    'Guy (US, edge-tts)',
+      female2: 'Sonia (UK, edge-tts)',
+      male2:   'Ryan (UK, edge-tts)',
+    },
   };
 
   if (!jobId) {
@@ -120,7 +129,14 @@
   }
 
   async function loadSegments() {
-    // 日本語セグメント
+    // 翻訳先の言語を取得（ボイス表示ラベルの切り替えに使う）
+    const dirRes = await fetch(`/jobs/${jobId}/direction`).catch(() => null);
+    if (dirRes && dirRes.ok) {
+      const dir = await dirRes.json();
+      targetLang = dir.target_lang || 'ja';
+    }
+
+    // 翻訳済みセグメント
     const res = await fetch(`/jobs/${jobId}/segments`);
     if (!res.ok) {
       document.getElementById('segment-list').innerHTML = '<div class="loading">セグメントが見つかりません。</div>';
@@ -128,11 +144,11 @@
     }
     segments = await res.json();
 
-    // 英語セグメント（参照用）
-    const enRes = await fetch(`/jobs/${jobId}/segments_en`).catch(() => null);
-    if (enRes && enRes.ok) {
-      const enList = await enRes.json();
-      enList.forEach(s => { enSegments[s.start] = s.text; });
+    // 原文セグメント（参照用）
+    const srcRes = await fetch(`/jobs/${jobId}/segments_source`).catch(() => null);
+    if (srcRes && srcRes.ok) {
+      const srcList = await srcRes.json();
+      srcList.forEach(s => { sourceSegments[s.start] = s.text; });
     }
 
     // 話者一覧（複数話者が検出された場合のみ設定パネルを表示）
@@ -162,11 +178,12 @@
     }
 
     card.style.display = '';
+    const labels = VOICE_LABELS[targetLang] || VOICE_LABELS.ja;
     list.innerHTML = speakers.map(sp => `
       <div class="speaker-voice-row">
         <label>${escHtml(sp)}</label>
         <select data-speaker="${escHtml(sp)}" onchange="onSpeakerVoiceChange(this)">
-          ${VOICE_ROTATION.map(v => `<option value="${v}" ${v === speakerVoiceMap[sp] ? 'selected' : ''}>${VOICE_LABELS[v]}</option>`).join('')}
+          ${VOICE_ROTATION.map(v => `<option value="${v}" ${v === speakerVoiceMap[sp] ? 'selected' : ''}>${labels[v]}</option>`).join('')}
         </select>
       </div>
     `).join('');
@@ -186,7 +203,7 @@
     const list = document.getElementById('segment-list');
     list.innerHTML = '';
     segments.forEach((seg, i) => {
-      const enText = enSegments[seg.start] || '';
+      const srcText = sourceSegments[seg.start] || '';
       const row = document.createElement('div');
       row.className = 'seg-row';
       const speakerBadge = seg.speaker
@@ -196,7 +213,7 @@
         <div class="time-cell">
           ${speakerBadge}${fmtTime(seg.start)}<br>→ ${fmtTime(seg.end)}
         </div>
-        <div class="en-text">${escHtml(enText || '（英語原文なし）')}</div>
+        <div class="en-text">${escHtml(srcText || '（原文なし）')}</div>
         <textarea data-idx="${i}" rows="3">${escHtml(seg.text)}</textarea>
         <button class="del-btn" onclick="deleteRow(${i})">削除</button>
       `;

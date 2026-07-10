@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>英語→日本語 自動吹き替えシステム Pro</title>
+<title>自動吹き替えシステム Pro（EN⇄JA）</title>
 <style>
   :root {
     --primary: #2563eb;
@@ -70,8 +70,8 @@
 <header>
   <div>🎙️</div>
   <div>
-    <h1>英語→日本語 自動吹き替えシステム Pro</h1>
-    <small>Whisper + Google翻訳 + Claude整形 + VOICEVOX</small>
+    <h1>自動吹き替えシステム Pro（EN⇄JA）</h1>
+    <small>WhisperX + Google翻訳 + Claude整形 + VOICEVOX/edge-tts</small>
   </div>
 </header>
 
@@ -103,6 +103,13 @@
 
     <div class="row">
       <div>
+        <label>翻訳方向</label>
+        <select id="direction-select">
+          <option value="en2ja" selected>英語 → 日本語</option>
+          <option value="ja2en">日本語 → 英語</option>
+        </select>
+      </div>
+      <div>
         <label>Whisper モデル</label>
         <select id="model-select">
           <option value="tiny">tiny（高速・低精度）</option>
@@ -126,28 +133,14 @@
 
     <div class="actions" id="action-buttons" style="display:none">
       <button id="edit-btn" onclick="">📝 翻訳結果を確認・編集</button>
-      <button id="run-btn" class="btn-success" style="display:none">▶ 日本語音声を合成して動画を生成</button>
+      <button id="run-btn" class="btn-success" style="display:none">▶ 音声を合成して動画を生成</button>
     </div>
 
     <!-- 声優選択（run前に表示） -->
     <div id="voice-row" style="display:none; margin-top:1rem;">
-      <label>声優（日本語 TTS）</label>
-      <select id="voice-select">
-        <optgroup label="edge-tts（ネット必要）">
-          <option value="female">女性 - Nanami（edge-tts）</option>
-          <option value="male">男性 - Keita（edge-tts）</option>
-        </optgroup>
-        <optgroup label="VOICEVOX（要起動）">
-          <option value="female">ずんだもん ノーマル（VOICEVOX）</option>
-          <option value="male">玄野武宏 ノーマル（VOICEVOX）</option>
-          <option value="female2">春日部つむぎ ノーマル（VOICEVOX）</option>
-          <option value="male2">四国めたん ノーマル（VOICEVOX）</option>
-        </optgroup>
-      </select>
-      <small style="color:#64748b; font-size:.8rem;">
-        VOICEVOXを使う場合は先に <code>bash start_voicevox.sh</code> で起動してください<br>
-        🗣️ 複数話者の動画は「翻訳結果を確認・編集」画面で話者ごとに声を割り当てできます
-      </small>
+      <label>声優（<span id="voice-row-lang">日本語</span> TTS）</label>
+      <select id="voice-select"></select>
+      <small id="voice-row-hint" style="color:#64748b; font-size:.8rem;"></small>
     </div>
   </div>
 
@@ -156,10 +149,10 @@
     <h2>③ ダウンロード</h2>
     <div class="actions">
       <a id="dl-video-btn" href="#" download>
-        <button class="btn-success">🎬 日本語吹き替え動画</button>
+        <button class="btn-success">🎬 吹き替え動画</button>
       </a>
       <a id="dl-audio-btn" href="#" download>
-        <button>🔊 日本語音声ファイル</button>
+        <button>🔊 音声ファイル</button>
       </a>
       <a id="dl-sub-btn" href="#" download>
         <button>📄 字幕ファイル（SRT）</button>
@@ -171,6 +164,46 @@
 <script>
   let currentJobId = null;
   let pollTimer    = null;
+
+  // 方向ごとのボイス選択肢
+  const VOICE_OPTIONS = {
+    ja: `
+      <optgroup label="VOICEVOX（要起動）">
+        <option value="female">ずんだもん ノーマル（VOICEVOX）</option>
+        <option value="male">玄野武宏 ノーマル（VOICEVOX）</option>
+        <option value="female2">春日部つむぎ ノーマル（VOICEVOX）</option>
+        <option value="male2">四国めたん ノーマル（VOICEVOX）</option>
+      </optgroup>
+      <optgroup label="edge-tts（VOICEVOX不可時のフォールバック）">
+        <option value="female">女性 - Nanami（edge-tts）</option>
+        <option value="male">男性 - Keita（edge-tts）</option>
+      </optgroup>`,
+    en: `
+      <optgroup label="edge-tts（英語ボイス）">
+        <option value="female">Female - Aria (US)</option>
+        <option value="male">Male - Guy (US)</option>
+        <option value="female2">Female - Sonia (UK)</option>
+        <option value="male2">Male - Ryan (UK)</option>
+      </optgroup>`,
+  };
+  const VOICE_HINTS = {
+    ja: 'VOICEVOXを使う場合は先に <code>.\\start_voicevox.ps1</code>（Windows）/ <code>bash start_voicevox.sh</code>（Ubuntu）で起動してください<br>🗣️ 複数話者の動画は「翻訳結果を確認・編集」画面で話者ごとに声を割り当てできます',
+    en: '🗣️ 英語出力はedge-ttsのみ使用（VOICEVOXは日本語専用のため対象外）。複数話者の動画は「翻訳結果を確認・編集」画面で話者ごとに声を割り当てできます',
+  };
+
+  function currentTargetLang() {
+    return document.getElementById('direction-select').value === 'ja2en' ? 'en' : 'ja';
+  }
+
+  function refreshVoiceOptions() {
+    const targetLang = currentTargetLang();
+    document.getElementById('voice-select').innerHTML = VOICE_OPTIONS[targetLang];
+    document.getElementById('voice-row-lang').textContent = targetLang === 'ja' ? '日本語' : '英語';
+    document.getElementById('voice-row-hint').innerHTML = VOICE_HINTS[targetLang];
+  }
+
+  document.getElementById('direction-select').addEventListener('change', refreshVoiceOptions);
+  refreshVoiceOptions();
 
   // タブ切り替え
   document.querySelectorAll('.tab').forEach(tab => {
@@ -205,6 +238,7 @@
   document.getElementById('upload-btn').addEventListener('click', async () => {
     const activeTab = document.querySelector('.tab.active').dataset.tab;
     const model = document.getElementById('model-select').value;
+    const direction = document.getElementById('direction-select').value;
 
     let res;
     if (activeTab === 'file') {
@@ -212,6 +246,7 @@
       const fd = new FormData();
       fd.append('file', selectedFile);
       fd.append('model', model);
+      fd.append('direction', direction);
       res = await fetch('/upload', { method: 'POST', body: fd });
     } else {
       const url = document.getElementById('url-input').value.trim();
@@ -219,6 +254,7 @@
       const fd = new FormData();
       fd.append('url', url);
       fd.append('model', model);
+      fd.append('direction', direction);
       res = await fetch('/download_url', { method: 'POST', body: fd });
     }
 

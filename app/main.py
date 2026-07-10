@@ -1,5 +1,5 @@
 """
-FastAPI バックエンド — 英語→日本語 自動吹き替えシステム
+FastAPI バックエンド — 自動吹き替えシステム（EN⇄JA双方向対応）
 """
 
 import json
@@ -15,12 +15,35 @@ from pydantic import BaseModel
 
 from app.pipeline import DEFAULT_SPEAKER, run_transcription, run_pipeline, update_status
 
-app = FastAPI(title="英語→日本語 自動吹き替えシステム")
+app = FastAPI(title="自動吹き替えシステム（EN⇄JA）")
 
 JOBS_DIR = Path("jobs")
 JOBS_DIR.mkdir(exist_ok=True)
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
+
+# direction → (source_lang, target_lang)
+DIRECTIONS = {
+    "en2ja": ("en", "ja"),
+    "ja2en": ("ja", "en"),
+}
+
+
+def _resolve_direction(direction: str) -> tuple[str, str]:
+    return DIRECTIONS.get(direction, DIRECTIONS["en2ja"])
+
+
+def _save_direction(job_dir: Path, source_lang: str, target_lang: str) -> None:
+    with open(job_dir / "direction.json", "w", encoding="utf-8") as f:
+        json.dump({"source_lang": source_lang, "target_lang": target_lang}, f)
+
+
+def _load_target_lang(job_dir: Path) -> str:
+    path = job_dir / "direction.json"
+    if not path.exists():
+        return "ja"
+    with open(path, encoding="utf-8") as f:
+        return json.load(f).get("target_lang", "ja")
 
 
 # ── ページ配信 ────────────────────────────────────────────────────────
@@ -40,6 +63,7 @@ async def upload(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     model: str = Form(default="medium"),
+    direction: str = Form(default="en2ja"),  # "en2ja" or "ja2en"
 ):
     job_id  = str(uuid.uuid4())[:8]
     job_dir = JOBS_DIR / job_id
@@ -51,8 +75,13 @@ async def upload(
     with open(input_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
+    source_lang, target_lang = _resolve_direction(direction)
+    _save_direction(job_dir, source_lang, target_lang)
+
     update_status(job_id, "uploaded", 0, "アップロード完了。文字起こしを開始します...")
-    background_tasks.add_task(run_transcription, job_id, str(input_path), model)
+    background_tasks.add_task(
+        run_transcription, job_id, str(input_path), model, source_lang, target_lang,
+    )
 
     return {"job_id": job_id}
 
@@ -63,11 +92,15 @@ async def download_from_url(
     background_tasks: BackgroundTasks,
     url: str = Form(...),
     model: str = Form(default="medium"),
+    direction: str = Form(default="en2ja"),
 ):
     import subprocess
     job_id  = str(uuid.uuid4())[:8]
     job_dir = JOBS_DIR / job_id
     job_dir.mkdir()
+
+    source_lang, target_lang = _resolve_direction(direction)
+    _save_direction(job_dir, source_lang, target_lang)
 
     update_status(job_id, "downloading", 0, "URLから動画をダウンロード中...")
 
@@ -88,7 +121,7 @@ async def download_from_url(
                 return
 
             update_status(job_id, "downloaded", 5, "ダウンロード完了。文字起こしを開始します...")
-            run_transcription(job_id, str(video_files[0]), model)
+            run_transcription(job_id, str(video_files[0]), model, source_lang, target_lang)
         except Exception as e:
             update_status(job_id, "error", 0, f"ダウンロードエラー: {e}")
 
@@ -106,11 +139,22 @@ async def get_status(job_id: str):
         return json.load(f)
 
 
+# ── 方向（言語ペア）取得 ────────────────────────────────────────────────
+@app.get("/jobs/{job_id}/direction")
+async def get_direction(job_id: str):
+    job_dir = JOBS_DIR / job_id
+    path = job_dir / "direction.json"
+    if not path.exists():
+        return {"source_lang": "en", "target_lang": "ja"}
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
 # ── セグメント取得（編集済み優先） ────────────────────────────────────
 @app.get("/jobs/{job_id}/segments")
 async def get_segments(job_id: str):
     job_dir = JOBS_DIR / job_id
-    for name in ["segments_ja_edited.json", "segments_ja.json"]:
+    for name in ["segments_translated_edited.json", "segments_translated.json"]:
         path = job_dir / name
         if path.exists():
             with open(path, encoding="utf-8") as f:
@@ -118,12 +162,12 @@ async def get_segments(job_id: str):
     return JSONResponse({"error": "セグメントが見つかりません"}, status_code=404)
 
 
-# ── 英語セグメント取得（編集画面の参照用） ─────────────────────────────
-@app.get("/jobs/{job_id}/segments_en")
-async def get_segments_en(job_id: str):
-    path = JOBS_DIR / job_id / "segments_en.json"
+# ── 原文セグメント取得（編集画面の参照用） ─────────────────────────────
+@app.get("/jobs/{job_id}/segments_source")
+async def get_segments_source(job_id: str):
+    path = JOBS_DIR / job_id / "segments_source.json"
     if not path.exists():
-        return JSONResponse({"error": "英語セグメントが見つかりません"}, status_code=404)
+        return JSONResponse({"error": "原文セグメントが見つかりません"}, status_code=404)
     with open(path, encoding="utf-8") as f:
         return json.load(f)
 
@@ -142,7 +186,7 @@ async def save_segments(job_id: str, segments: List[Segment] = Body(...)):
     if not job_dir.exists():
         return JSONResponse({"error": "ジョブが見つかりません"}, status_code=404)
 
-    path = job_dir / "segments_ja_edited.json"
+    path = job_dir / "segments_translated_edited.json"
     with open(path, "w", encoding="utf-8") as f:
         json.dump([s.model_dump() for s in segments], f, ensure_ascii=False, indent=2)
 
@@ -153,7 +197,7 @@ async def save_segments(job_id: str, segments: List[Segment] = Body(...)):
 @app.get("/jobs/{job_id}/speakers")
 async def get_speakers(job_id: str):
     job_dir = JOBS_DIR / job_id
-    for name in ["segments_ja_edited.json", "segments_ja.json"]:
+    for name in ["segments_translated_edited.json", "segments_translated.json"]:
         path = job_dir / name
         if path.exists():
             with open(path, encoding="utf-8") as f:
@@ -184,8 +228,10 @@ async def run_job(
         except json.JSONDecodeError:
             return JSONResponse({"error": "speaker_voice_map のJSONが不正です"}, status_code=400)
 
+    target_lang = _load_target_lang(JOBS_DIR / job_id)
+
     update_status(job_id, "processing", 0, "処理を開始しています...")
-    background_tasks.add_task(run_pipeline, job_id, voice, subtitle, svm)
+    background_tasks.add_task(run_pipeline, job_id, voice, subtitle, svm, target_lang)
 
     return {"started": True}
 
@@ -200,7 +246,7 @@ async def download_video(job_id: str):
     return FileResponse(
         output_path,
         media_type="video/mp4",
-        filename="output_japanese.mp4",
+        filename="output_dubbed.mp4",
     )
 
 
@@ -214,19 +260,19 @@ async def download_subtitle(job_id: str):
     return FileResponse(
         sub_path,
         media_type="text/plain; charset=utf-8",
-        filename="subtitle_japanese.srt",
+        filename="subtitle_dubbed.srt",
     )
 
 
 # ── 音声ファイルダウンロード ──────────────────────────────────────────
 @app.get("/jobs/{job_id}/audio")
 async def download_audio(job_id: str):
-    audio_path = JOBS_DIR / job_id / "japanese_audio.wav"
+    audio_path = JOBS_DIR / job_id / "dubbed_audio.wav"
     if not audio_path.exists():
         return JSONResponse({"error": "音声ファイルがまだ完成していません"}, status_code=404)
 
     return FileResponse(
         audio_path,
         media_type="audio/wav",
-        filename="japanese_audio.wav",
+        filename="dubbed_audio.wav",
     )

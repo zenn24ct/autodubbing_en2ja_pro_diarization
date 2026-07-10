@@ -1,11 +1,11 @@
 """
-処理パイプライン — 英語→日本語 自動吹き替え Pro（話者識別対応版）
+処理パイプライン — 自動吹き替え Pro（EN⇄JA双方向 + 話者識別対応版）
 
-STEP 1: 音声抽出 + WhisperX 英語文字起こし + 話者識別 → segments_en.json（speakerフィールド付き）
-STEP 2: Google翻訳 → 日本語テキスト
-STEP 3: Claude API で口語化・整形（APIキーがあれば実行）→ segments_ja.json
-STEP 4: VOICEVOX で日本語音声生成（話者IDごとに音声切り替え）+ 話速調整（最大2倍速）
-STEP 5: 動画に日本語音声を合成 → output.mp4
+STEP 1: 音声抽出 + WhisperX 文字起こし(source_lang) + 話者識別 → segments_source.json（speakerフィールド付き）
+STEP 2: Google翻訳(source_lang→target_lang) → 翻訳テキスト
+STEP 3: Claude API で口語化・整形（APIキーがあれば実行、target_langに応じたプロンプト）→ segments_translated.json
+STEP 4: 音声生成（話者IDごとに音声切り替え。JA出力=VOICEVOX優先/edge-ttsフォールバック、EN出力=edge-tts）+ 話速調整（最大2倍速）
+STEP 5: 動画に音声を合成 → output.mp4
 STEP 6: SRT 字幕ファイル生成 → subtitle.srt
 """
 
@@ -32,10 +32,18 @@ VOICEVOX_SPEAKERS = {
     "male2":   9,   # 雨晴はう
 }
 
-# edge-tts（VOICEVOXが使えない場合のフォールバック）
-EDGE_VOICES = {
+# edge-tts 日本語ボイス（VOICEVOXが使えない場合のフォールバック）
+EDGE_VOICES_JA = {
     "female":  "ja-JP-NanamiNeural",
     "male":    "ja-JP-KeitaNeural",
+}
+
+# edge-tts 英語ボイス（EN出力時はVOICEVOXが使えないためこちらを直接使用）
+EDGE_VOICES_EN = {
+    "female":  "en-US-AriaNeural",
+    "male":    "en-US-GuyNeural",
+    "female2": "en-GB-SoniaNeural",
+    "male2":   "en-GB-RyanNeural",
 }
 
 # 速度調整の上限（2.0倍まで許容）
@@ -158,7 +166,7 @@ def merge_into_sentences(segments: list[dict]) -> list[dict]:
     return merged
 
 
-# ── STEP 1: WhisperX 英語文字起こし + 話者識別 ────────────────────────
+# ── STEP 1: WhisperX 文字起こし + 話者識別 ────────────────────────────
 def _assign_segment_speakers(result: dict) -> list[dict]:
     """WhisperXのalign結果(単語ごとにspeakerが付く)から、セグメント単位の
     speakerを決定する。セグメント内で最頻出のspeakerを採用する。"""
@@ -179,7 +187,22 @@ def _assign_segment_speakers(result: dict) -> list[dict]:
     return segments
 
 
-def run_transcription(job_id: str, input_path: str, model_size: str = "large-v3") -> None:
+def _assign_speaker_by_overlap(seg_start: float, seg_end: float, diarize_df) -> str:
+    """単語アライメントが無い場合のフォールバック: セグメントの時間範囲と
+    最も重なりが大きい話者区間(diarize_dfの行)のspeakerを採用する。"""
+    best_speaker, best_overlap = DEFAULT_SPEAKER, 0.0
+    for _, row in diarize_df.iterrows():
+        overlap = min(seg_end, row["end"]) - max(seg_start, row["start"])
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_speaker = row["speaker"]
+    return best_speaker
+
+
+def run_transcription(
+    job_id: str, input_path: str, model_size: str = "large-v3",
+    source_lang: str = "en", target_lang: str = "ja",
+) -> None:
     try:
         update_status(job_id, "transcribing", 5, "音声を抽出中...")
 
@@ -189,60 +212,87 @@ def run_transcription(job_id: str, input_path: str, model_size: str = "large-v3"
 
             model_size = os.environ.get("WHISPER_MODEL", model_size)
             update_status(job_id, "transcribing", 10,
-                          f"WhisperX ({model_size}) で英語を文字起こし中...（数分かかります）")
+                          f"WhisperX ({model_size}) で{source_lang}を文字起こし中...（数分かかります）")
 
             model = whisperx.load_model(
                 model_size, WHISPERX_DEVICE, compute_type=WHISPERX_COMPUTE_TYPE,
-                language="en",
+                language=source_lang,
             )
             audio = whisperx.load_audio(audio_wav)
-            result = model.transcribe(audio, batch_size=WHISPERX_BATCH_SIZE, language="en")
+            result = model.transcribe(audio, batch_size=WHISPERX_BATCH_SIZE, language=source_lang)
 
-            update_status(job_id, "transcribing", 25, "単語単位でタイムスタンプを整列中...")
-            align_model, align_metadata = whisperx.load_align_model(
-                language_code="en", device=WHISPERX_DEVICE,
-            )
-            result = whisperx.align(
-                result["segments"], align_model, align_metadata, audio, WHISPERX_DEVICE,
-                return_char_alignments=False,
-            )
-            del align_model
-
-            if HF_TOKEN:
-                update_status(job_id, "transcribing", 35, "話者を識別中（WhisperX diarization）...")
-                diarize_kwargs = {}
-                if DIARIZATION_MIN_SPEAKERS:
-                    diarize_kwargs["min_speakers"] = int(DIARIZATION_MIN_SPEAKERS)
-                if DIARIZATION_MAX_SPEAKERS:
-                    diarize_kwargs["max_speakers"] = int(DIARIZATION_MAX_SPEAKERS)
-
-                diarize_model = whisperx.diarize.DiarizationPipeline(
-                    use_auth_token=HF_TOKEN, device=WHISPERX_DEVICE,
+            # 単語アライメントは言語ごとに専用モデルが必要で、言語によっては
+            # 用意されていないことがある。失敗してもセグメント単位の文字起こし
+            # 自体は活かし、話者識別だけ精度を落として続行する。
+            aligned = False
+            try:
+                update_status(job_id, "transcribing", 25, "単語単位でタイムスタンプを整列中...")
+                align_model, align_metadata = whisperx.load_align_model(
+                    language_code=source_lang, device=WHISPERX_DEVICE,
                 )
-                diarize_segments = diarize_model(audio, **diarize_kwargs)
-                result = whisperx.assign_word_speakers(diarize_segments, result)
+                result = whisperx.align(
+                    result["segments"], align_model, align_metadata, audio, WHISPERX_DEVICE,
+                    return_char_alignments=False,
+                )
+                del align_model
+                aligned = True
+            except Exception as e:
+                print(f"[WhisperX] 言語'{source_lang}'の単語アライメントに失敗したためスキップします: {e}")
+
+            diarize_df = None
+            if HF_TOKEN:
+                try:
+                    update_status(job_id, "transcribing", 35, "話者を識別中（WhisperX diarization）...")
+                    diarize_kwargs = {}
+                    if DIARIZATION_MIN_SPEAKERS:
+                        diarize_kwargs["min_speakers"] = int(DIARIZATION_MIN_SPEAKERS)
+                    if DIARIZATION_MAX_SPEAKERS:
+                        diarize_kwargs["max_speakers"] = int(DIARIZATION_MAX_SPEAKERS)
+
+                    diarize_model = whisperx.diarize.DiarizationPipeline(
+                        use_auth_token=HF_TOKEN, device=WHISPERX_DEVICE,
+                    )
+                    diarize_df = diarize_model(audio, **diarize_kwargs)
+                    if aligned:
+                        result = whisperx.assign_word_speakers(diarize_df, result)
+                except Exception as e:
+                    print(f"[WhisperX] 話者識別に失敗しました（単一話者として扱います）: {e}")
+                    diarize_df = None
             else:
                 print("[WhisperX] HF_TOKEN未設定のため話者識別をスキップ（単一話者として扱います）")
 
-        raw_segments = [
-            s for s in _assign_segment_speakers(result) if s["text"]
-        ]
+        if aligned:
+            raw_segments = [s for s in _assign_segment_speakers(result) if s["text"]]
+        else:
+            raw_segments = [
+                {
+                    "start": round(s["start"], 2),
+                    "end":   round(s["end"], 2),
+                    "text":  s["text"].strip(),
+                    "speaker": (
+                        _assign_speaker_by_overlap(s["start"], s["end"], diarize_df)
+                        if diarize_df is not None else DEFAULT_SPEAKER
+                    ),
+                }
+                for s in result["segments"] if s["text"].strip()
+            ]
+
         segments = merge_into_sentences(raw_segments)
 
-        with open(JOBS_DIR / job_id / "segments_en.json", "w", encoding="utf-8") as f:
+        with open(JOBS_DIR / job_id / "segments_source.json", "w", encoding="utf-8") as f:
             json.dump(segments, f, ensure_ascii=False, indent=2)
 
         update_status(job_id, "translating", 50,
                       f"文字起こし完了（{len(segments)} セグメント）。翻訳・整形中...")
 
         # STEP2+3: 翻訳 → 口語化整形
-        segments_ja = translate_and_refine(job_id, segments)
+        translated_segments = translate_and_refine(job_id, segments, source_lang, target_lang)
 
-        with open(JOBS_DIR / job_id / "segments_ja.json", "w", encoding="utf-8") as f:
-            json.dump(segments_ja, f, ensure_ascii=False, indent=2)
+        with open(JOBS_DIR / job_id / "segments_translated.json", "w", encoding="utf-8") as f:
+            json.dump(translated_segments, f, ensure_ascii=False, indent=2)
 
         update_status(job_id, "ready_to_edit", 100,
-                      f"翻訳・整形完了（{len(segments_ja)} セグメント）。編集・確認できます。")
+                      f"翻訳・整形完了（{len(translated_segments)} セグメント）。編集・確認できます。")
 
     except Exception as e:
         update_status(job_id, "error", 0, f"文字起こしエラー: {e}")
@@ -250,18 +300,48 @@ def run_transcription(job_id: str, input_path: str, model_size: str = "large-v3"
 
 
 # ── STEP 2: Google翻訳 ───────────────────────────────────────────────
-def translate_text_google(text: str) -> str:
+def translate_text_google(text: str, source_lang: str, target_lang: str) -> str:
     try:
-        return GoogleTranslator(source="en", target="ja").translate(text)
+        return GoogleTranslator(source=source_lang, target=target_lang).translate(text)
     except Exception as e:
         print(f"[Google翻訳エラー] {e}")
         return text
 
 
 # ── STEP 3: Claude API で口語化・整形 ────────────────────────────────
-def refine_segments_claude(segments: list[dict], api_key: str) -> list[dict]:
+# target_langごとの整形プロンプト。出力先の話し言葉として自然になるよう
+# ルールを言語別に用意する（日本語と英語では「口語化」の勘所が違うため）。
+_REFINE_PROMPTS = {
+    "ja": (
+        "以下は動画の音声を日本語に機械翻訳したセグメントのリストです（JSON配列）。\n"
+        "各セグメントには duration（秒）と text（翻訳文）があります。\n\n"
+        "以下のルールで日本語を吹き替え音声用に整形してください：\n"
+        "1. 口語体・話し言葉に変換する（「〜しています」→「〜してます」など）\n"
+        "2. duration 秒以内に読み切れる長さに収める（目安: 1秒あたり7〜8文字）\n"
+        "3. 意味は保ちつつ簡潔に。省略より言い換えを優先する\n"
+        "4. 不自然な直訳表現を自然な日本語に直す\n"
+        "5. 疑問文・感嘆文は口語的に\n\n"
+        "出力は同じ構造のJSON配列で、textフィールドのみ変更してください。\n"
+        "他の説明は不要です。\n\n"
+    ),
+    "en": (
+        "Below is a list of segments machine-translated into English from a video's "
+        "audio (JSON array). Each segment has duration (seconds) and text (the translated line).\n\n"
+        "Rewrite the English text for a spoken dubbing track, following these rules:\n"
+        "1. Use natural, conversational spoken English (contractions like \"I'm\", \"don't\", etc.)\n"
+        "2. Keep it short enough to read aloud within duration seconds (rough guide: ~2.5-3 words/sec)\n"
+        "3. Preserve meaning but prefer paraphrasing over omission when shortening\n"
+        "4. Fix awkward literal-translation phrasing into natural spoken English\n"
+        "5. Keep questions/exclamations conversational in tone\n\n"
+        "Output the same JSON array structure, changing only the text field.\n"
+        "No other explanation needed.\n\n"
+    ),
+}
+
+
+def refine_segments_claude(segments: list[dict], api_key: str, target_lang: str) -> list[dict]:
     """
-    Google翻訳後の日本語を吹き替え用に整形する。
+    翻訳後のテキストを吹き替え用に口語整形する。
     ・直訳を口語体に変換
     ・尺に収まるよう簡潔に短縮（省略ではなく言い換え）
     ・自然な話し言葉に統一
@@ -269,6 +349,8 @@ def refine_segments_claude(segments: list[dict], api_key: str) -> list[dict]:
     """
     import anthropic
     client = anthropic.Anthropic(api_key=api_key)
+
+    prompt_header = _REFINE_PROMPTS.get(target_lang, _REFINE_PROMPTS["ja"])
 
     refined = []
     total = len(segments)
@@ -282,24 +364,12 @@ def refine_segments_claude(segments: list[dict], api_key: str) -> list[dict]:
             {
                 "id": i + batch_start,
                 "duration": round(seg["end"] - seg["start"], 2),
-                "ja": seg["text"],
+                "text": seg["text"],
             }
             for i, seg in enumerate(batch)
         ]
 
-        prompt = (
-            "以下は英語動画を日本語に機械翻訳したセグメントのリストです（JSON配列）。\n"
-            "各セグメントには duration（秒）と ja（翻訳文）があります。\n\n"
-            "以下のルールで日本語を吹き替え音声用に整形してください：\n"
-            "1. 口語体・話し言葉に変換する（「〜しています」→「〜してます」など）\n"
-            "2. duration 秒以内に読み切れる長さに収める（目安: 1秒あたり7〜8文字）\n"
-            "3. 意味は保ちつつ簡潔に。省略より言い換えを優先する\n"
-            "4. 不自然な直訳表現を自然な日本語に直す\n"
-            "5. 疑問文・感嘆文は口語的に\n\n"
-            "出力は同じ構造のJSON配列で、jaフィールドのみ変更してください。\n"
-            "他の説明は不要です。\n\n"
-            f"{json.dumps(items, ensure_ascii=False)}"
-        )
+        prompt = prompt_header + f"{json.dumps(items, ensure_ascii=False)}"
 
         try:
             response = client.messages.create(
@@ -315,7 +385,7 @@ def refine_segments_claude(segments: list[dict], api_key: str) -> list[dict]:
                 lines = [l for l in lines if not l.strip().startswith("```")]
                 raw = "\n".join(lines).strip()
             result_items = json.loads(raw)
-            refined_map = {item["id"]: item["ja"] for item in result_items}
+            refined_map = {item["id"]: item["text"] for item in result_items}
 
             for i, seg in enumerate(batch):
                 seg_id = i + batch_start
@@ -331,19 +401,23 @@ def refine_segments_claude(segments: list[dict], api_key: str) -> list[dict]:
     return refined
 
 
-def translate_and_refine(job_id: str, segments: list[dict]) -> list[dict]:
+def translate_and_refine(
+    job_id: str, segments: list[dict], source_lang: str = "en", target_lang: str = "ja",
+) -> list[dict]:
     """Google翻訳 → Claude整形（APIキーがあれば）の2ステップ処理。"""
     total = len(segments)
-    ja_segments = []
+    translated_segments = []
 
     # STEP2: Google翻訳
     for i, seg in enumerate(segments):
-        en_text = seg["text"].strip()
-        ja_text = translate_text_google(en_text) if en_text else ""
-        ja_segments.append({
+        src_text = seg["text"].strip()
+        translated_text = (
+            translate_text_google(src_text, source_lang, target_lang) if src_text else ""
+        )
+        translated_segments.append({
             "start": seg["start"],
             "end":   seg["end"],
-            "text":  ja_text,
+            "text":  translated_text,
             "speaker": seg.get("speaker", DEFAULT_SPEAKER),
         })
         update_status(job_id, "translating",
@@ -354,14 +428,14 @@ def translate_and_refine(job_id: str, segments: list[dict]) -> list[dict]:
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if api_key:
         update_status(job_id, "refining", 80,
-                      "Claude API で口語化・整形中...（吹き替え用に自然な日本語に変換）")
-        ja_segments = refine_segments_claude(ja_segments, api_key)
+                      "Claude API で口語化・整形中...（吹き替え用に自然な言い回しに変換）")
+        translated_segments = refine_segments_claude(translated_segments, api_key, target_lang)
         update_status(job_id, "refining", 95, "整形完了")
     else:
         update_status(job_id, "translating", 95,
-                      "ANTHROPIC_API_KEY 未設定のため整形スキップ（Google翻訳そのまま）")
+                      "ANTHROPIC_API_KEY 未設定のため整形スキップ（機械翻訳そのまま）")
 
-    return ja_segments
+    return translated_segments
 
 
 # ── STEP 4: VOICEVOX TTS ─────────────────────────────────────────────
@@ -400,12 +474,11 @@ def tts_voicevox(text: str, output_path: str, speaker_id: int) -> None:
         os.unlink(tmp_wav)
 
 
-def tts_edge(text: str, output_path: str, voice_key: str) -> None:
-    """VOICEVOXが使えない場合のフォールバック。"""
-    voice = EDGE_VOICES.get(voice_key, EDGE_VOICES["female"])
+def tts_edge(text: str, output_path: str, edge_voice: str) -> None:
+    """edge-ttsで音声合成する（edge_voiceは"ja-JP-NanamiNeural"等の具体的なボイス名）。"""
 
     async def _run():
-        await edge_tts.Communicate(text, voice).save(output_path)
+        await edge_tts.Communicate(text, edge_voice).save(output_path)
 
     loop = asyncio.new_event_loop()
     try:
@@ -414,14 +487,23 @@ def tts_edge(text: str, output_path: str, voice_key: str) -> None:
         loop.close()
 
 
-def tts_segment(text: str, output_path: str, voice_key: str) -> None:
-    """VOICEVOXを試み、失敗したらedge-ttsにフォールバック。"""
-    speaker_id = VOICEVOX_SPEAKERS.get(voice_key, VOICEVOX_SPEAKERS["female"])
-    try:
-        tts_voicevox(text, output_path, speaker_id)
-    except Exception as e:
-        print(f"[VOICEVOX失敗 → edge-ttsにフォールバック] {e}")
-        tts_edge(text, output_path, voice_key)
+def tts_segment(text: str, output_path: str, voice_key: str, target_lang: str = "ja") -> None:
+    """target_langに応じてTTSバックエンドを切り替える。
+    - ja: VOICEVOXを試み、失敗したらedge-tts(日本語ボイス)にフォールバック
+    - それ以外(en等): VOICEVOXは日本語専用のため使えない。edge-ttsの該当言語ボイスを直接使う
+    """
+    if target_lang == "ja":
+        speaker_id = VOICEVOX_SPEAKERS.get(voice_key, VOICEVOX_SPEAKERS["female"])
+        try:
+            tts_voicevox(text, output_path, speaker_id)
+            return
+        except Exception as e:
+            print(f"[VOICEVOX失敗 → edge-ttsにフォールバック] {e}")
+            edge_voice = EDGE_VOICES_JA.get(voice_key, EDGE_VOICES_JA["female"])
+            tts_edge(text, output_path, edge_voice)
+    else:
+        edge_voice = EDGE_VOICES_EN.get(voice_key, EDGE_VOICES_EN["female"])
+        tts_edge(text, output_path, edge_voice)
 
 
 # ── 話速調整（最大2倍速） ────────────────────────────────────────────
@@ -489,14 +571,14 @@ def generate_srt(segments: list[dict], output_path: str) -> None:
 
 # ── 話者ID → 音声(voice_key) マッピング解決 ───────────────────────────
 def resolve_speaker_voice_map(
-    ja_segments: list[dict], voice_key: str, speaker_voice_map: dict[str, str] | None,
+    translated_segments: list[dict], voice_key: str, speaker_voice_map: dict[str, str] | None,
 ) -> dict[str, str]:
     """登場する話者すべてに対して使用する voice_key を確定する。
     - speaker_voice_map に明示指定があればそれを優先
     - 指定が無い話者には、デフォルト voice_key → 未使用ならローテーションを割り当て
       （話者識別が無効/単一話者の場合は従来どおり voice_key 一本になる）
     """
-    speakers = sorted({seg.get("speaker", DEFAULT_SPEAKER) for seg in ja_segments})
+    speakers = sorted({seg.get("speaker", DEFAULT_SPEAKER) for seg in translated_segments})
     explicit = speaker_voice_map or {}
 
     resolved: dict[str, str] = {}
@@ -518,20 +600,21 @@ def run_pipeline(
     voice_key: str = "female",
     make_subtitle: bool = True,
     speaker_voice_map: dict[str, str] | None = None,
+    target_lang: str = "ja",
 ) -> None:
     try:
         job_dir = JOBS_DIR / job_id
 
         # 編集済みを優先
-        edited   = job_dir / "segments_ja_edited.json"
-        original = job_dir / "segments_ja.json"
+        edited   = job_dir / "segments_translated_edited.json"
+        original = job_dir / "segments_translated.json"
         seg_path = edited if edited.exists() else original
 
         if not seg_path.exists():
-            raise RuntimeError("日本語セグメントファイルが見つかりません")
+            raise RuntimeError("翻訳済みセグメントファイルが見つかりません")
 
         with open(seg_path, encoding="utf-8") as f:
-            ja_segments = json.load(f)
+            translated_segments = json.load(f)
 
         input_files = [
             p for p in job_dir.iterdir()
@@ -544,22 +627,23 @@ def run_pipeline(
         input_path    = str(input_files[0])
         is_audio_only = input_files[0].suffix.lower() in {".mp3", ".wav", ".m4a"}
         total_duration = get_duration(input_path)
-        total          = len(ja_segments)
+        total          = len(translated_segments)
 
-        voice_map = resolve_speaker_voice_map(ja_segments, voice_key, speaker_voice_map)
+        voice_map = resolve_speaker_voice_map(translated_segments, voice_key, speaker_voice_map)
 
         # 字幕生成
         if make_subtitle:
             update_status(job_id, "processing", 2, "字幕ファイルを生成中...")
-            generate_srt(ja_segments, str(job_dir / "subtitle.srt"))
+            generate_srt(translated_segments, str(job_dir / "subtitle.srt"))
 
+        engine_label = "VOICEVOX" if target_lang == "ja" else "edge-tts"
         update_status(job_id, "processing", 5,
-                      f"VOICEVOX で日本語音声を生成中（話者{len(voice_map)}人: {voice_map}）...")
+                      f"{engine_label} で音声を生成中（話者{len(voice_map)}人: {voice_map}）...")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             track = AudioSegment.silent(duration=int(total_duration * 1000) + 3000)
 
-            for i, seg in enumerate(ja_segments):
+            for i, seg in enumerate(translated_segments):
                 text = seg.get("text", "").strip()
                 if not text:
                     continue
@@ -573,7 +657,7 @@ def run_pipeline(
 
                 tts_path = os.path.join(tmpdir, f"seg_{i:04d}.mp3")
                 try:
-                    tts_segment(text, tts_path, seg_voice)
+                    tts_segment(text, tts_path, seg_voice, target_lang)
                 except Exception as e:
                     print(f"[TTS失敗 seg {i}] {e}")
                     continue
@@ -594,23 +678,23 @@ def run_pipeline(
                 )
 
             # 音声書き出し
-            update_status(job_id, "processing", 82, "日本語音声トラックを書き出し中...")
-            ja_wav = os.path.join(tmpdir, "japanese_track.wav")
-            track.export(ja_wav, format="wav")
+            update_status(job_id, "processing", 82, "音声トラックを書き出し中...")
+            dubbed_wav = os.path.join(tmpdir, "dubbed_track.wav")
+            track.export(dubbed_wav, format="wav")
 
             import shutil
-            shutil.copy(ja_wav, str(job_dir / "japanese_audio.wav"))
+            shutil.copy(dubbed_wav, str(job_dir / "dubbed_audio.wav"))
 
             if is_audio_only:
-                shutil.copy(ja_wav, str(job_dir / "output.mp4"))
+                shutil.copy(dubbed_wav, str(job_dir / "output.mp4"))
                 update_status(job_id, "done", 100, "完成しました！")
                 return
 
             # 動画合成
-            update_status(job_id, "processing", 88, "動画に日本語音声を合成中...")
+            update_status(job_id, "processing", 88, "動画に音声を合成中...")
             result = subprocess.run(
                 ["ffmpeg", "-y",
-                 "-i", input_path, "-i", ja_wav,
+                 "-i", input_path, "-i", dubbed_wav,
                  "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
                  "-map", "0:v:0", "-map", "1:a:0",
                  "-shortest", str(job_dir / "output.mp4")],
