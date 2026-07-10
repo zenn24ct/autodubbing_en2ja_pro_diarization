@@ -215,6 +215,77 @@ def _assign_segment_speakers(result: dict) -> list[dict]:
     return segments
 
 
+# 文末とみなす記号（英語 . ! ? … と 日本語 。！？）
+_SENTENCE_FINAL_ALL = _SENTENCE_FINAL | frozenset("。！？")
+
+
+def _split_into_sentence_segments(result: dict, source_lang: str,
+                                  max_sec: float = _MAX_SEG_SEC) -> list[dict]:
+    """WhisperXの粗いセグメントを、単語レベルのタイムスタンプを使って
+    文単位に分割し直す。WhisperXはVADベースで長い区間を1セグメントとして
+    返すため（短い動画だと全体が1個になりやすい）、旧whisperのような
+    文単位の細かさを取り戻すために単語境界で切り直す。
+
+    文末記号・最大長・話者交代のいずれかで区切る。単語情報が無いセグメントは
+    そのまま1つの単位として扱う（分割せず維持）。
+    """
+    joiner = "" if source_lang in ("ja", "zh") else " "
+    out: list[dict] = []
+    buf: list[dict] = []       # {"t":語, "e":終了時刻, "sp":話者}
+    buf_start: float | None = None
+    last_end = 0.0
+
+    def flush():
+        nonlocal buf, buf_start
+        if not buf:
+            return
+        text = joiner.join(w["t"] for w in buf).strip()
+        if text:
+            votes = [w["sp"] for w in buf if w["sp"]]
+            speaker = max(set(votes), key=votes.count) if votes else DEFAULT_SPEAKER
+            out.append({
+                "start": round(buf_start, 2),
+                "end":   round(buf[-1]["e"], 2),
+                "text":  text,
+                "speaker": speaker,
+            })
+        buf = []
+        buf_start = None
+
+    for seg in result["segments"]:
+        words = [w for w in seg.get("words", []) if w.get("word", "").strip()]
+
+        # 単語情報が無いセグメントは分割せずそのまま1単位で出す
+        if not words:
+            flush()
+            t = seg.get("text", "").strip()
+            if t:
+                out.append({
+                    "start": round(seg.get("start", last_end), 2),
+                    "end":   round(seg.get("end", seg.get("start", last_end)), 2),
+                    "text":  t,
+                    "speaker": seg.get("speaker", DEFAULT_SPEAKER),
+                })
+            continue
+
+        for w in words:
+            tok = w["word"].strip()
+            st  = w.get("start", last_end)
+            en  = w.get("end", st)
+            last_end = en
+            if not buf:
+                buf_start = st
+            buf.append({"t": tok, "e": en, "sp": w.get("speaker")})
+
+            ends_sentence = tok[-1] in _SENTENCE_FINAL_ALL
+            too_long      = (en - buf_start) >= max_sec
+            if ends_sentence or too_long:
+                flush()
+
+    flush()
+    return out
+
+
 def _assign_speaker_by_overlap(seg_start: float, seg_end: float, diarize_df) -> str:
     """単語アライメントが無い場合のフォールバック: セグメントの時間範囲と
     最も重なりが大きい話者区間(diarize_dfの行)のspeakerを採用する。"""
@@ -288,7 +359,8 @@ def run_transcription(
                 print("[WhisperX] HF_TOKEN未設定のため話者識別をスキップ（単一話者として扱います）")
 
         if aligned:
-            raw_segments = [s for s in _assign_segment_speakers(result) if s["text"]]
+            # 単語タイムスタンプで文単位に分割し直す（WhisperXの粗いセグメントを細かく）
+            raw_segments = [s for s in _split_into_sentence_segments(result, source_lang) if s["text"]]
         else:
             raw_segments = [
                 {
